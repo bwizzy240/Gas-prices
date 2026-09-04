@@ -132,7 +132,7 @@
       <span>Live from Kalshi</span>
       <button class="fetch-btn" id="fetchKalshiBtn">Fetch latest</button>
     </p>
-    <div class="fetch-status" id="kalshiStatus">Not fetched yet — tap "Fetch latest" for live markets.</div>
+    <div class="fetch-status" id="kalshiStatus">Not fetched yet — tap "Fetch latest" for the closest-to-even-odds market.</div>
     <div class="market-list" id="marketList"></div>
   </div>
 
@@ -252,9 +252,10 @@ async function fetchKalshi(){
     }
 
     statusEl.className = 'fetch-status ok';
-    statusEl.textContent = `Got ${markets.length} open market${markets.length===1?'':'s'} — tap one to fill it in.`;
 
-    markets.forEach(m => {
+    // Parse every returned market, then keep only the one whose YES price
+    // is closest to 50¢ — i.e. the closest to a genuine coin-flip.
+    const parsed = markets.map(m => {
       const title = m.title || m.subtitle || m.ticker;
       let yesCents = null;
       if(typeof m.yes_bid_dollars === 'number') yesCents = Math.round(m.yes_bid_dollars * 100);
@@ -263,24 +264,43 @@ async function fetchKalshi(){
       let noCents = null;
       if(typeof m.no_bid_dollars === 'number') noCents = Math.round(m.no_bid_dollars * 100);
       else if(typeof m.no_bid === 'number') noCents = m.no_bid;
-      else if(yesCents !== null) noCents = 100 - yesCents; // fallback estimate if Kalshi didn't return a NO quote
+      else if(yesCents !== null) noCents = 100 - yesCents;
 
       let thresholdGuess = null;
       const match = (title || '').match(/(\d+\.\d+)/);
       if(match) thresholdGuess = parseFloat(match[1]);
       else if(typeof m.floor_strike === 'number') thresholdGuess = m.floor_strike;
 
-      const item = document.createElement('div');
-      item.className = 'market-item';
-      item.innerHTML = `<div class="t">${title}</div><div class="p">${yesCents !== null ? 'YES ' + yesCents + '¢' : 'price unavailable'}${noCents !== null ? ' · NO ' + noCents + '¢' : ''}${thresholdGuess !== null ? ' · line ~$' + thresholdGuess.toFixed(4) : ''}</div>`;
-      item.addEventListener('click', () => {
-        if(thresholdGuess !== null) document.getElementById('threshold').value = thresholdGuess.toFixed(4);
-        if(yesCents !== null) document.getElementById('yesPrice').value = yesCents;
-        if(noCents !== null) document.getElementById('noPrice').value = noCents;
-        recompute();
-      });
-      listEl.appendChild(item);
+      return { title, yesCents, noCents, thresholdGuess };
+    }).filter(m => m.yesCents !== null);
+
+    if(parsed.length === 0){
+      statusEl.className = 'fetch-status err';
+      statusEl.textContent = 'Markets came back but none had a readable price — try the manual fields below.';
+      return;
+    }
+
+    parsed.sort((a, b) => Math.abs(a.yesCents - 50) - Math.abs(b.yesCents - 50));
+    const closest = parsed[0];
+
+    statusEl.textContent = `Closest to even odds: YES ${closest.yesCents}¢ — filled in below.`;
+
+    const item = document.createElement('div');
+    item.className = 'market-item';
+    item.innerHTML = `<div class="t">${closest.title}</div><div class="p">YES ${closest.yesCents}¢${closest.noCents !== null ? ' · NO ' + closest.noCents + '¢' : ''}${closest.thresholdGuess !== null ? ' · line ~$' + closest.thresholdGuess.toFixed(4) : ''}</div>`;
+    item.addEventListener('click', () => {
+      if(closest.thresholdGuess !== null) document.getElementById('threshold').value = closest.thresholdGuess.toFixed(4);
+      document.getElementById('yesPrice').value = closest.yesCents;
+      if(closest.noCents !== null) document.getElementById('noPrice').value = closest.noCents;
+      recompute();
     });
+    listEl.appendChild(item);
+
+    // Auto-fill immediately too, since this is the one market we're keeping.
+    if(closest.thresholdGuess !== null) document.getElementById('threshold').value = closest.thresholdGuess.toFixed(4);
+    document.getElementById('yesPrice').value = closest.yesCents;
+    if(closest.noCents !== null) document.getElementById('noPrice').value = closest.noCents;
+    recompute();
 
   } catch(err){
     statusEl.className = 'fetch-status err';
