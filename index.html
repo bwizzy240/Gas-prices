@@ -221,7 +221,7 @@
   </div>
 
   <footer>
-    Both "Fetch latest" buttons now call small serverless functions on this same domain (<code>/api/kalshi</code>, <code>/api/aaa</code>), which do the actual outside fetching — so there's no browser CORS issue either way. The news check is still your judgment call; ask Claude any time for a fresh read on that.
+    Kalshi and AAA now both fetch automatically when this page loads, then Kalshi re-checks every 5 minutes and AAA every 30 while the tab stays open — the buttons are there for an on-demand refresh, not the only way to trigger it. The news check still needs your own judgment call; ask Claude any time for a fresh read on that.
   </footer>
 
 </div>
@@ -333,11 +333,23 @@ async function fetchAaa(){
     if(data.error) throw new Error(data.error);
     if(typeof data.price !== 'number') throw new Error('No price in response');
 
-    // Roll today's old value into "yesterday" before setting the new one —
-    // this is how the day-over-day delta builds up as you check daily.
-    const oldToday = document.getElementById('aaaToday').value;
-    document.getElementById('aaaYesterday').value = oldToday;
+    // Only roll today's value into "yesterday" the first time we see a new
+    // date. Without this check, refreshing twice on the same day would
+    // overwrite the real "yesterday" price with today's own price.
+    const hist = loadAaaHistory();
+    const isNewDay = !hist || !hist.asOf || hist.asOf !== data.asOf;
+
+    if(isNewDay){
+      const oldToday = parseFloat(document.getElementById('aaaToday').value);
+      if(!isNaN(oldToday)) document.getElementById('aaaYesterday').value = oldToday.toFixed(4);
+    }
     document.getElementById('aaaToday').value = data.price.toFixed(4);
+
+    saveAaaHistory({
+      today: data.price,
+      asOf: data.asOf,
+      yesterday: parseFloat(document.getElementById('aaaYesterday').value)
+    });
 
     statusEl.className = 'fetch-status ok';
     statusEl.textContent = data.asOf ? `Fetched — AAA shows this as of ${data.asOf}.` : 'Fetched successfully.';
@@ -350,6 +362,29 @@ async function fetchAaa(){
     btn.disabled = false;
   }
 }
+
+// --- local persistence for the AAA day-over-day roll ---
+const AAA_STORAGE_KEY = 'gasCheckerAaaHistory';
+
+function loadAaaHistory(){
+  try{
+    const raw = localStorage.getItem(AAA_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch(e){ return null; }
+}
+
+function saveAaaHistory(hist){
+  try{ localStorage.setItem(AAA_STORAGE_KEY, JSON.stringify(hist)); } catch(e){ /* storage unavailable, skip */ }
+}
+
+// Restore whatever we last knew, so a page reload doesn't fall back to the
+// hardcoded placeholder values and accidentally lose real history.
+(function restoreAaaHistory(){
+  const hist = loadAaaHistory();
+  if(!hist) return;
+  if(typeof hist.today === 'number') document.getElementById('aaaToday').value = hist.today.toFixed(4);
+  if(typeof hist.yesterday === 'number') document.getElementById('aaaYesterday').value = hist.yesterday.toFixed(4);
+})();
 
 document.getElementById('fetchKalshiBtn').addEventListener('click', fetchKalshi);
 document.getElementById('fetchAaaBtn').addEventListener('click', fetchAaa);
@@ -433,6 +468,15 @@ function fillCalc(priceCents, budget, ids){
 
 document.querySelectorAll('input').forEach(el => el.addEventListener('input', recompute));
 recompute();
+
+// Auto-fetch both sources as soon as the page loads, then keep Kalshi's
+// odds refreshing periodically while the tab stays open. AAA only publishes
+// once a day, so there's no benefit to polling it faster than every 30 min —
+// and the same-day check above keeps repeated fetches safe either way.
+fetchKalshi();
+fetchAaa();
+setInterval(fetchKalshi, 5 * 60 * 1000);   // every 5 minutes
+setInterval(fetchAaa, 30 * 60 * 1000);     // every 30 minutes
 </script>
 </body>
 </html>
