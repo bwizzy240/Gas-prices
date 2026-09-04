@@ -87,7 +87,6 @@
   .v.pos{ color:var(--green); }
   .v.neg{ color:var(--red); }
 
-  /* live fetch panel */
   .fetch-btn{
     background:var(--amber); color:#20160A; border:none; font-weight:700;
     font-size:13px; padding:8px 14px; border-radius:5px; cursor:pointer;
@@ -131,9 +130,9 @@
   <div class="panel">
     <p class="panel-title">
       <span>Live from Kalshi</span>
-      <button class="fetch-btn" id="fetchBtn">Fetch latest</button>
+      <button class="fetch-btn" id="fetchKalshiBtn">Fetch latest</button>
     </p>
-    <div class="fetch-status" id="fetchStatus">Not fetched yet — tap "Fetch latest" for live markets.</div>
+    <div class="fetch-status" id="kalshiStatus">Not fetched yet — tap "Fetch latest" for live markets.</div>
     <div class="market-list" id="marketList"></div>
   </div>
 
@@ -165,8 +164,12 @@
 
   <!-- AAA readout -->
   <div class="panel">
-    <p class="panel-title"><span>Today's gas price (from AAA)</span></p>
-    <div class="readout">
+    <p class="panel-title">
+      <span>Today's gas price (from AAA)</span>
+      <button class="fetch-btn" id="fetchAaaBtn">Fetch latest</button>
+    </p>
+    <div class="fetch-status" id="aaaStatus">Not fetched yet — tap "Fetch latest" for today's AAA number.</div>
+    <div class="readout" style="margin-top:10px;">
       <span class="price-digits">$<span id="aaaTodayDisplay">4.1474</span></span>
       <span id="deltaBadge" class="delta up">+0.38¢ vs yesterday</span>
     </div>
@@ -198,7 +201,7 @@
   </div>
 
   <footer>
-    "Fetch latest" calls Kalshi's public market-data API directly from your browser — no login needed, since it's read-only. If your browser blocks it, the manual fields below still work exactly as before. AAA price and the news check still need a quick manual look — ask Claude to <code>refresh this with today's numbers and news</code> any time.
+    Both "Fetch latest" buttons now call small serverless functions on this same domain (<code>/api/kalshi</code>, <code>/api/aaa</code>), which do the actual outside fetching — so there's no browser CORS issue either way. The news check is still your judgment call; ask Claude any time for a fresh read on that.
   </footer>
 
 </div>
@@ -207,21 +210,21 @@
 function fmt(n){ return '$' + n.toFixed(2); }
 
 async function fetchKalshi(){
-  const statusEl = document.getElementById('fetchStatus');
+  const statusEl = document.getElementById('kalshiStatus');
   const listEl = document.getElementById('marketList');
-  const btn = document.getElementById('fetchBtn');
+  const btn = document.getElementById('fetchKalshiBtn');
   btn.disabled = true;
   statusEl.className = 'fetch-status';
   statusEl.textContent = 'Fetching…';
   listEl.innerHTML = '';
 
   try{
-    const url = 'https://external-api.kalshi.com/trade-api/v2/markets?series_ticker=KXAAAGASD&status=open';
-    const res = await fetch(url);
-    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const res = await fetch('/api/kalshi');
     const data = await res.json();
-    const markets = data.markets || [];
 
+    if(data.error) throw new Error(data.error);
+
+    const markets = data.markets || [];
     if(markets.length === 0){
       statusEl.className = 'fetch-status err';
       statusEl.textContent = 'No open markets returned right now — try the manual fields below.';
@@ -233,12 +236,10 @@ async function fetchKalshi(){
 
     markets.forEach(m => {
       const title = m.title || m.subtitle || m.ticker;
-      // yes price: try common field names, Kalshi returns dollars fields sometimes, else cents
       let yesCents = null;
       if(typeof m.yes_bid_dollars === 'number') yesCents = Math.round(m.yes_bid_dollars * 100);
       else if(typeof m.yes_bid === 'number') yesCents = m.yes_bid;
 
-      // try to pull the threshold number out of the title text, e.g. "Above $4.1450"
       let thresholdGuess = null;
       const match = (title || '').match(/(\d+\.\d+)/);
       if(match) thresholdGuess = parseFloat(match[1]);
@@ -257,13 +258,46 @@ async function fetchKalshi(){
 
   } catch(err){
     statusEl.className = 'fetch-status err';
-    statusEl.textContent = 'Live fetch blocked or failed (' + err.message + '). Use the manual fields below instead.';
+    statusEl.textContent = 'Live fetch failed (' + err.message + '). Use the manual fields below instead.';
   } finally {
     btn.disabled = false;
   }
 }
 
-document.getElementById('fetchBtn').addEventListener('click', fetchKalshi);
+async function fetchAaa(){
+  const statusEl = document.getElementById('aaaStatus');
+  const btn = document.getElementById('fetchAaaBtn');
+  btn.disabled = true;
+  statusEl.className = 'fetch-status';
+  statusEl.textContent = 'Fetching…';
+
+  try{
+    const res = await fetch('/api/aaa');
+    const data = await res.json();
+
+    if(data.error) throw new Error(data.error);
+    if(typeof data.price !== 'number') throw new Error('No price in response');
+
+    // Roll today's old value into "yesterday" before setting the new one —
+    // this is how the day-over-day delta builds up as you check daily.
+    const oldToday = document.getElementById('aaaToday').value;
+    document.getElementById('aaaYesterday').value = oldToday;
+    document.getElementById('aaaToday').value = data.price.toFixed(4);
+
+    statusEl.className = 'fetch-status ok';
+    statusEl.textContent = data.asOf ? `Fetched — AAA shows this as of ${data.asOf}.` : 'Fetched successfully.';
+
+    recompute();
+  } catch(err){
+    statusEl.className = 'fetch-status err';
+    statusEl.textContent = 'Live fetch failed (' + err.message + '). Use the manual fields below instead.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('fetchKalshiBtn').addEventListener('click', fetchKalshi);
+document.getElementById('fetchAaaBtn').addEventListener('click', fetchAaa);
 
 function recompute(){
   const today = parseFloat(document.getElementById('aaaToday').value);
