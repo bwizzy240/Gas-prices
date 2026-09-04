@@ -147,6 +147,10 @@
       <label>Price to buy YES (¢)</label>
       <input type="number" id="yesPrice" value="40" step="1" min="1" max="99">
     </div>
+    <div class="row">
+      <label>Price to buy NO (¢)<span class="sub">usually close to 100 − YES, but check the real quote</span></label>
+      <input type="number" id="noPrice" value="60" step="1" min="1" max="99">
+    </div>
   </div>
 
   <!-- NEWS CHECK -->
@@ -200,6 +204,22 @@
     </div>
   </div>
 
+  <div class="panel">
+    <p class="panel-title"><span>If you spend $10 on NO</span></p>
+    <div class="row">
+      <label>Budget ($)</label>
+      <input type="number" id="budgetNo" value="10" step="1" min="1">
+    </div>
+    <div class="calc-grid">
+      <div class="calc-item"><div class="k">Shares you get</div><div class="v" id="outContractsNo">–</div></div>
+      <div class="calc-item"><div class="k">Fee</div><div class="v" id="outFeeNo">–</div></div>
+      <div class="calc-item"><div class="k">Total spent</div><div class="v" id="outCostNo">–</div></div>
+      <div class="calc-item"><div class="k">You get back if right</div><div class="v" id="outPayoutNo">–</div></div>
+      <div class="calc-item"><div class="k">Profit if right</div><div class="v pos" id="outProfitNo">–</div></div>
+      <div class="calc-item"><div class="k">You lose if wrong</div><div class="v neg" id="outLossNo">–</div></div>
+    </div>
+  </div>
+
   <footer>
     Both "Fetch latest" buttons now call small serverless functions on this same domain (<code>/api/kalshi</code>, <code>/api/aaa</code>), which do the actual outside fetching — so there's no browser CORS issue either way. The news check is still your judgment call; ask Claude any time for a fresh read on that.
   </footer>
@@ -240,6 +260,11 @@ async function fetchKalshi(){
       if(typeof m.yes_bid_dollars === 'number') yesCents = Math.round(m.yes_bid_dollars * 100);
       else if(typeof m.yes_bid === 'number') yesCents = m.yes_bid;
 
+      let noCents = null;
+      if(typeof m.no_bid_dollars === 'number') noCents = Math.round(m.no_bid_dollars * 100);
+      else if(typeof m.no_bid === 'number') noCents = m.no_bid;
+      else if(yesCents !== null) noCents = 100 - yesCents; // fallback estimate if Kalshi didn't return a NO quote
+
       let thresholdGuess = null;
       const match = (title || '').match(/(\d+\.\d+)/);
       if(match) thresholdGuess = parseFloat(match[1]);
@@ -247,10 +272,11 @@ async function fetchKalshi(){
 
       const item = document.createElement('div');
       item.className = 'market-item';
-      item.innerHTML = `<div class="t">${title}</div><div class="p">${yesCents !== null ? 'YES ' + yesCents + '¢' : 'price unavailable'}${thresholdGuess !== null ? ' · line ~$' + thresholdGuess.toFixed(4) : ''}</div>`;
+      item.innerHTML = `<div class="t">${title}</div><div class="p">${yesCents !== null ? 'YES ' + yesCents + '¢' : 'price unavailable'}${noCents !== null ? ' · NO ' + noCents + '¢' : ''}${thresholdGuess !== null ? ' · line ~$' + thresholdGuess.toFixed(4) : ''}</div>`;
       item.addEventListener('click', () => {
         if(thresholdGuess !== null) document.getElementById('threshold').value = thresholdGuess.toFixed(4);
         if(yesCents !== null) document.getElementById('yesPrice').value = yesCents;
+        if(noCents !== null) document.getElementById('noPrice').value = noCents;
         recompute();
       });
       listEl.appendChild(item);
@@ -304,6 +330,7 @@ function recompute(){
   const yesterday = parseFloat(document.getElementById('aaaYesterday').value);
   const threshold = parseFloat(document.getElementById('threshold').value);
   const yesCents = parseFloat(document.getElementById('yesPrice').value);
+  const noCentsForWhy = parseFloat(document.getElementById('noPrice').value);
   const budget = parseFloat(document.getElementById('budget').value);
   const newsFlag = document.getElementById('newsFlag').checked;
 
@@ -334,30 +361,45 @@ function recompute(){
   } else if(gapCents < -typicalMove){
     badge.textContent = "DON'T BUY YES";
     badge.className = 'badge skip';
-    why.innerHTML = `Today's price is <b>${Math.abs(gapCents).toFixed(2)}¢ below</b> the line Kalshi is betting on. It's unlikely to jump that far overnight on a normal day, so YES is probably not worth ${yesCents}¢ today.`;
+    why.innerHTML = `Today's price is <b>${Math.abs(gapCents).toFixed(2)}¢ below</b> the line Kalshi is betting on. It's unlikely to jump that far overnight on a normal day, so YES is probably not worth ${yesCents}¢ today — but NO, priced at ${noCentsForWhy}¢, looks more interesting here. Check the "$10 on NO" numbers below.`;
   } else {
     badge.textContent = 'SKIP TODAY';
     badge.className = 'badge wait';
     why.innerHTML = `Today's price is only <b>${gapCents.toFixed(2)}¢</b> from the line — that's within normal overnight noise, so there's no clear edge either way.`;
   }
 
-  const P = yesCents / 100;
-  if(P > 0 && P < 1 && budget > 0){
-    const contracts = Math.floor(budget / P);
-    const cost = contracts * P;
-    const fee = Math.ceil(0.07 * contracts * P * (1 - P) * 100) / 100;
-    const totalCost = cost + fee;
-    const payout = contracts * 1.0;
-    const profit = payout - totalCost;
-    const loss = -totalCost;
+  const budgetNo = parseFloat(document.getElementById('budgetNo').value);
 
-    document.getElementById('outContracts').textContent = contracts;
-    document.getElementById('outFee').textContent = fmt(fee);
-    document.getElementById('outCost').textContent = fmt(totalCost);
-    document.getElementById('outPayout').textContent = fmt(payout);
-    document.getElementById('outProfit').textContent = fmt(profit);
-    document.getElementById('outLoss').textContent = fmt(loss);
-  }
+  fillCalc(yesCents, budget, {
+    contracts:'outContracts', fee:'outFee', cost:'outCost',
+    payout:'outPayout', profit:'outProfit', loss:'outLoss'
+  });
+  fillCalc(noCentsForWhy, budgetNo, {
+    contracts:'outContractsNo', fee:'outFeeNo', cost:'outCostNo',
+    payout:'outPayoutNo', profit:'outProfitNo', loss:'outLossNo'
+  });
+}
+
+// Same Kalshi fee formula applies to either side — YES or NO — since both
+// are just contracts priced between 1¢ and 99¢.
+function fillCalc(priceCents, budget, ids){
+  const P = priceCents / 100;
+  if(!(P > 0 && P < 1 && budget > 0)) return;
+
+  const contracts = Math.floor(budget / P);
+  const cost = contracts * P;
+  const fee = Math.ceil(0.07 * contracts * P * (1 - P) * 100) / 100;
+  const totalCost = cost + fee;
+  const payout = contracts * 1.0;
+  const profit = payout - totalCost;
+  const loss = -totalCost;
+
+  document.getElementById(ids.contracts).textContent = contracts;
+  document.getElementById(ids.fee).textContent = fmt(fee);
+  document.getElementById(ids.cost).textContent = fmt(totalCost);
+  document.getElementById(ids.payout).textContent = fmt(payout);
+  document.getElementById(ids.profit).textContent = fmt(profit);
+  document.getElementById(ids.loss).textContent = fmt(loss);
 }
 
 document.querySelectorAll('input').forEach(el => el.addEventListener('input', recompute));
