@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gas Price Check</title>
+<style>
+  :root{
+    --bg:#10151C;
+    --panel:#161D26;
+    --panel-alt:#1B232E;
+    --line:#28323F;
+    --amber:#F2A93B;
+    --amber-dim:#7A5A22;
+    --green:#5FBE8D;
+    --red:#E2685A;
+    --text:#EDEAE3;
+    --muted:#8B93A1;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text); font-family:var(--sans);
+    display:flex; justify-content:center; padding:28px 16px 60px;
+  }
+  .wrap{ width:100%; max-width:440px; }
+  header{ margin-bottom:18px; }
+  .eyebrow{ color:var(--muted); font-size:13px; }
+  h1{ font-size:20px; margin:4px 0 0; font-weight:600; }
+
+  .panel{
+    background:var(--panel); border:1px solid var(--line); border-radius:6px;
+    padding:18px 20px; margin-bottom:14px;
+  }
+  .panel-title{ font-size:12.5px; color:var(--muted); margin:0 0 12px; display:flex; justify-content:space-between; align-items:center; }
+
+  .badge-wrap{ text-align:center; padding:8px 0 4px; }
+  .badge{
+    display:inline-block; font-family:var(--mono); font-size:22px; font-weight:700;
+    padding:12px 28px; border-radius:8px; letter-spacing:0.02em;
+  }
+  .badge.buy{ background:rgba(95,190,141,0.12); color:var(--green); border:1px solid #254639; }
+  .badge.skip{ background:rgba(226,104,90,0.10); color:var(--red); border:1px solid #4a2e29; }
+  .badge.wait{ background:rgba(139,147,161,0.10); color:var(--muted); border:1px solid var(--line); }
+  .why{ margin-top:12px; font-size:14px; line-height:1.55; }
+  .why b{ color:inherit; }
+
+  .readout{ display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  .price-digits{ font-family:var(--mono); font-size:36px; color:var(--amber); font-weight:600; }
+  .delta{ font-family:var(--mono); font-size:13px; padding:3px 8px; border-radius:4px; border:1px solid var(--line); }
+  .delta.up{ color:var(--red); border-color:#4a2e29;}
+  .delta.down{ color:var(--green); border-color:#254639;}
+
+  .row{
+    display:flex; justify-content:space-between; align-items:center; gap:12px;
+    padding:9px 0; border-bottom:1px solid var(--line);
+  }
+  .row:last-child{ border-bottom:none; }
+  .row label{ font-size:13.5px; }
+  .row .sub{ display:block; color:var(--muted); font-size:11.5px; margin-top:2px; }
+  input[type=number]{
+    background:var(--panel-alt); border:1px solid var(--line); color:var(--text);
+    font-family:var(--mono); font-size:14px; padding:7px 9px; border-radius:4px;
+    width:100px; text-align:right;
+  }
+  input[type=number]:focus{ outline:none; border-color:var(--amber-dim); }
+
+  .risk-line{
+    display:flex; align-items:center; gap:10px;
+    padding:8px 10px; border-radius:5px; background:var(--panel-alt);
+    font-size:13px; margin-bottom:12px; border:1px solid var(--line);
+  }
+  .risk-dot{ width:8px; height:8px; border-radius:50%; flex:none; }
+  .risk-dot.elevated{ background:var(--amber); }
+  .risk-dot.normal{ background:var(--green); }
+  .toggle-row{
+    display:flex; align-items:center; justify-content:space-between; gap:12px; padding:6px 0;
+  }
+  .toggle-row label{ font-size:13.5px; }
+  .toggle-row .sub{ display:block; color:var(--muted); font-size:11.5px; margin-top:2px; }
+  input[type=checkbox]{ width:20px; height:20px; accent-color:var(--red); cursor:pointer; }
+
+  .calc-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; margin-top:14px; }
+  .calc-item .k{ font-size:11.5px; color:var(--muted); margin-bottom:2px; }
+  .calc-item .v{ font-family:var(--mono); font-size:16px; }
+  .v.pos{ color:var(--green); }
+  .v.neg{ color:var(--red); }
+
+  /* live fetch panel */
+  .fetch-btn{
+    background:var(--amber); color:#20160A; border:none; font-weight:700;
+    font-size:13px; padding:8px 14px; border-radius:5px; cursor:pointer;
+    font-family:var(--sans);
+  }
+  .fetch-btn:disabled{ opacity:0.5; cursor:default; }
+  .fetch-status{ font-size:12.5px; color:var(--muted); margin-top:2px; min-height:16px; }
+  .fetch-status.err{ color:var(--red); }
+  .fetch-status.ok{ color:var(--green); }
+  .market-list{ margin-top:10px; display:flex; flex-direction:column; gap:6px; }
+  .market-item{
+    text-align:left; background:var(--panel-alt); border:1px solid var(--line);
+    color:var(--text); font-family:var(--sans); font-size:12.5px; padding:9px 11px;
+    border-radius:5px; cursor:pointer; line-height:1.4;
+  }
+  .market-item:hover{ border-color:var(--amber-dim); }
+  .market-item .t{ font-weight:600; }
+  .market-item .p{ font-family:var(--mono); color:var(--amber); margin-top:3px; }
+
+  footer{ margin-top:8px; color:var(--muted); font-size:12px; line-height:1.6; }
+  footer code{ font-family:var(--mono); color:var(--text); background:var(--panel-alt); padding:1px 5px; border-radius:3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">National gas price · next-day market</div>
+    <h1>Should I buy today?</h1>
+  </header>
+
+  <!-- VERDICT -->
+  <div class="panel">
+    <div class="badge-wrap">
+      <span id="badge" class="badge wait">CHECKING...</span>
+    </div>
+    <div id="why" class="why"></div>
+  </div>
+
+  <!-- LIVE KALSHI FETCH -->
+  <div class="panel">
+    <p class="panel-title">
+      <span>Live from Kalshi</span>
+      <button class="fetch-btn" id="fetchBtn">Fetch latest</button>
+    </p>
+    <div class="fetch-status" id="fetchStatus">Not fetched yet — tap "Fetch latest" for live markets.</div>
+    <div class="market-list" id="marketList"></div>
+  </div>
+
+  <!-- Kalshi quote (manual / auto-filled) -->
+  <div class="panel">
+    <p class="panel-title"><span>Tomorrow's market — line &amp; price</span></p>
+    <div class="row">
+      <label>Line it's betting on ($)<span class="sub">the "Above $X" number</span></label>
+      <input type="number" id="threshold" value="4.1450" step="0.0001">
+    </div>
+    <div class="row">
+      <label>Price to buy YES (¢)</label>
+      <input type="number" id="yesPrice" value="40" step="1" min="1" max="99">
+    </div>
+  </div>
+
+  <!-- NEWS CHECK -->
+  <div class="panel">
+    <p class="panel-title"><span>News check</span></p>
+    <div class="risk-line">
+      <span class="risk-dot elevated"></span>
+      <span>Background risk right now: <b>elevated</b> — Middle East tensions, tight global refining capacity, active hurricane season. No single new shock as of this check, but the usual "small daily move" pattern is less reliable than normal.</span>
+    </div>
+    <div class="toggle-row">
+      <label>Something happened today<span class="sub">new attack, storm landfall, refinery shutdown, surprise OPEC move</span></label>
+      <input type="checkbox" id="newsFlag">
+    </div>
+  </div>
+
+  <!-- AAA readout -->
+  <div class="panel">
+    <p class="panel-title"><span>Today's gas price (from AAA)</span></p>
+    <div class="readout">
+      <span class="price-digits">$<span id="aaaTodayDisplay">4.1474</span></span>
+      <span id="deltaBadge" class="delta up">+0.38¢ vs yesterday</span>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label>Today's price ($)</label>
+      <input type="number" id="aaaToday" value="4.1474" step="0.0001">
+    </div>
+    <div class="row">
+      <label>Yesterday's price ($)</label>
+      <input type="number" id="aaaYesterday" value="4.1436" step="0.0001">
+    </div>
+  </div>
+
+  <!-- Trade calculator -->
+  <div class="panel">
+    <p class="panel-title"><span>If you spend $10 on YES</span></p>
+    <div class="row">
+      <label>Budget ($)</label>
+      <input type="number" id="budget" value="10" step="1" min="1">
+    </div>
+    <div class="calc-grid">
+      <div class="calc-item"><div class="k">Shares you get</div><div class="v" id="outContracts">–</div></div>
+      <div class="calc-item"><div class="k">Fee</div><div class="v" id="outFee">–</div></div>
+      <div class="calc-item"><div class="k">Total spent</div><div class="v" id="outCost">–</div></div>
+      <div class="calc-item"><div class="k">You get back if right</div><div class="v" id="outPayout">–</div></div>
+      <div class="calc-item"><div class="k">Profit if right</div><div class="v pos" id="outProfit">–</div></div>
+      <div class="calc-item"><div class="k">You lose if wrong</div><div class="v neg" id="outLoss">–</div></div>
+    </div>
+  </div>
+
+  <footer>
+    "Fetch latest" calls Kalshi's public market-data API directly from your browser — no login needed, since it's read-only. If your browser blocks it, the manual fields below still work exactly as before. AAA price and the news check still need a quick manual look — ask Claude to <code>refresh this with today's numbers and news</code> any time.
+  </footer>
+
+</div>
+
+<script>
+function fmt(n){ return '$' + n.toFixed(2); }
+
+async function fetchKalshi(){
+  const statusEl = document.getElementById('fetchStatus');
+  const listEl = document.getElementById('marketList');
+  const btn = document.getElementById('fetchBtn');
+  btn.disabled = true;
+  statusEl.className = 'fetch-status';
+  statusEl.textContent = 'Fetching…';
+  listEl.innerHTML = '';
+
+  try{
+    const url = 'https://external-api.kalshi.com/trade-api/v2/markets?series_ticker=KXAAAGASD&status=open';
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const markets = data.markets || [];
+
+    if(markets.length === 0){
+      statusEl.className = 'fetch-status err';
+      statusEl.textContent = 'No open markets returned right now — try the manual fields below.';
+      return;
+    }
+
+    statusEl.className = 'fetch-status ok';
+    statusEl.textContent = `Got ${markets.length} open market${markets.length===1?'':'s'} — tap one to fill it in.`;
+
+    markets.forEach(m => {
+      const title = m.title || m.subtitle || m.ticker;
+      // yes price: try common field names, Kalshi returns dollars fields sometimes, else cents
+      let yesCents = null;
+      if(typeof m.yes_bid_dollars === 'number') yesCents = Math.round(m.yes_bid_dollars * 100);
+      else if(typeof m.yes_bid === 'number') yesCents = m.yes_bid;
+
+      // try to pull the threshold number out of the title text, e.g. "Above $4.1450"
+      let thresholdGuess = null;
+      const match = (title || '').match(/(\d+\.\d+)/);
+      if(match) thresholdGuess = parseFloat(match[1]);
+      else if(typeof m.floor_strike === 'number') thresholdGuess = m.floor_strike;
+
+      const item = document.createElement('div');
+      item.className = 'market-item';
+      item.innerHTML = `<div class="t">${title}</div><div class="p">${yesCents !== null ? 'YES ' + yesCents + '¢' : 'price unavailable'}${thresholdGuess !== null ? ' · line ~$' + thresholdGuess.toFixed(4) : ''}</div>`;
+      item.addEventListener('click', () => {
+        if(thresholdGuess !== null) document.getElementById('threshold').value = thresholdGuess.toFixed(4);
+        if(yesCents !== null) document.getElementById('yesPrice').value = yesCents;
+        recompute();
+      });
+      listEl.appendChild(item);
+    });
+
+  } catch(err){
+    statusEl.className = 'fetch-status err';
+    statusEl.textContent = 'Live fetch blocked or failed (' + err.message + '). Use the manual fields below instead.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('fetchBtn').addEventListener('click', fetchKalshi);
+
+function recompute(){
+  const today = parseFloat(document.getElementById('aaaToday').value);
+  const yesterday = parseFloat(document.getElementById('aaaYesterday').value);
+  const threshold = parseFloat(document.getElementById('threshold').value);
+  const yesCents = parseFloat(document.getElementById('yesPrice').value);
+  const budget = parseFloat(document.getElementById('budget').value);
+  const newsFlag = document.getElementById('newsFlag').checked;
+
+  document.getElementById('aaaTodayDisplay').textContent = today.toFixed(4);
+  const deltaCents = (today - yesterday) * 100;
+  const deltaBadge = document.getElementById('deltaBadge');
+  if(deltaCents >= 0){
+    deltaBadge.textContent = '+' + deltaCents.toFixed(2) + '¢ vs yesterday';
+    deltaBadge.className = 'delta up';
+  } else {
+    deltaBadge.textContent = deltaCents.toFixed(2) + '¢ vs yesterday';
+    deltaBadge.className = 'delta down';
+  }
+
+  const gapCents = (today - threshold) * 100;
+  const typicalMove = 0.6;
+  const badge = document.getElementById('badge');
+  const why = document.getElementById('why');
+
+  if(newsFlag){
+    badge.textContent = 'SKIP TODAY';
+    badge.className = 'badge skip';
+    why.innerHTML = `You flagged breaking news today. When something's actually happening — a storm, an attack, a refinery going down — gas prices can jump or drop far more than the usual half-cent overnight move. The math below doesn't apply on days like this. Best to sit this one out.`;
+  } else if(gapCents > typicalMove){
+    badge.textContent = 'BUY YES';
+    badge.className = 'badge buy';
+    why.innerHTML = `Today's price is already <b>${gapCents.toFixed(2)}¢ above</b> the line Kalshi is betting on. On a normal day, prices rarely move more than about half a cent overnight, so tomorrow will likely clear that line too. Kalshi's only charging ${yesCents}¢ for YES right now — that looks cheap for how likely this is. (Background risk is elevated this season — worth a quick headline scan before you click buy.)`;
+  } else if(gapCents < -typicalMove){
+    badge.textContent = "DON'T BUY YES";
+    badge.className = 'badge skip';
+    why.innerHTML = `Today's price is <b>${Math.abs(gapCents).toFixed(2)}¢ below</b> the line Kalshi is betting on. It's unlikely to jump that far overnight on a normal day, so YES is probably not worth ${yesCents}¢ today.`;
+  } else {
+    badge.textContent = 'SKIP TODAY';
+    badge.className = 'badge wait';
+    why.innerHTML = `Today's price is only <b>${gapCents.toFixed(2)}¢</b> from the line — that's within normal overnight noise, so there's no clear edge either way.`;
+  }
+
+  const P = yesCents / 100;
+  if(P > 0 && P < 1 && budget > 0){
+    const contracts = Math.floor(budget / P);
+    const cost = contracts * P;
+    const fee = Math.ceil(0.07 * contracts * P * (1 - P) * 100) / 100;
+    const totalCost = cost + fee;
+    const payout = contracts * 1.0;
+    const profit = payout - totalCost;
+    const loss = -totalCost;
+
+    document.getElementById('outContracts').textContent = contracts;
+    document.getElementById('outFee').textContent = fmt(fee);
+    document.getElementById('outCost').textContent = fmt(totalCost);
+    document.getElementById('outPayout').textContent = fmt(payout);
+    document.getElementById('outProfit').textContent = fmt(profit);
+    document.getElementById('outLoss').textContent = fmt(loss);
+  }
+}
+
+document.querySelectorAll('input').forEach(el => el.addEventListener('input', recompute));
+recompute();
+</script>
+</body>
+</html>
