@@ -66,6 +66,20 @@
   }
   input[type=number]:focus{ outline:none; border-color:var(--amber-dim); }
 
+  select{
+    background:var(--panel-alt); border:1px solid var(--line); color:var(--text);
+    font-family:var(--sans); font-size:13px; padding:7px 9px; border-radius:4px;
+    max-width:200px;
+  }
+  select:focus{ outline:none; border-color:var(--amber-dim); }
+
+  .warn-line{
+    display:flex; align-items:center; gap:8px;
+    padding:7px 9px; border-radius:5px; background:rgba(242,169,59,0.08);
+    border:1px solid var(--amber-dim); font-size:12.5px; margin-top:10px;
+    color:var(--amber);
+  }
+
   .risk-line{
     display:flex; align-items:center; gap:10px;
     padding:8px 10px; border-radius:5px; background:var(--panel-alt);
@@ -155,7 +169,7 @@
 
   <!-- NEWS CHECK -->
   <div class="panel">
-    <p class="panel-title"><span>News check</span></p>
+    <p class="panel-title"><span>News check &amp; regime</span></p>
     <div class="risk-line">
       <span class="risk-dot elevated"></span>
       <span>Background risk right now: <b>elevated</b> — Middle East tensions, tight global refining capacity, active hurricane season. No single new shock as of this check, but the usual "small daily move" pattern is less reliable than normal.</span>
@@ -164,6 +178,15 @@
       <label>Something happened today<span class="sub">new attack, storm landfall, refinery shutdown, surprise OPEC move</span></label>
       <input type="checkbox" id="newsFlag">
     </div>
+    <div class="row">
+      <label>Volatility regime<span class="sub">sets how big a move counts as "normal" — from the Sep 2026 research pass</span></label>
+      <select id="regimeSelect">
+        <option value="1.5">Calm (1.5¢)</option>
+        <option value="2.0">Normal / hurricane season (2.0¢)</option>
+        <option value="9.0" selected>Active shock (9.0¢) — current default</option>
+      </select>
+    </div>
+    <div class="fetch-status" id="historyStatus" style="margin-top:8px;"></div>
   </div>
 
   <!-- AAA readout -->
@@ -202,6 +225,7 @@
       <div class="calc-item"><div class="k">Profit if right</div><div class="v pos" id="outProfit">–</div></div>
       <div class="calc-item"><div class="k">You lose if wrong</div><div class="v neg" id="outLoss">–</div></div>
     </div>
+    <div class="warn-line" id="warnYes" style="display:none;">Priced under 15¢ — Kalshi's own data shows contracts this cheap lose money over 60% of the time. Treat this as a longshot, not a value bet.</div>
   </div>
 
   <div class="panel">
@@ -218,10 +242,11 @@
       <div class="calc-item"><div class="k">Profit if right</div><div class="v pos" id="outProfitNo">–</div></div>
       <div class="calc-item"><div class="k">You lose if wrong</div><div class="v neg" id="outLossNo">–</div></div>
     </div>
+    <div class="warn-line" id="warnNo" style="display:none;">Priced under 15¢ — Kalshi's own data shows contracts this cheap lose money over 60% of the time. Treat this as a longshot, not a value bet.</div>
   </div>
 
   <footer>
-    Kalshi and AAA now both fetch automatically when this page loads, then Kalshi re-checks every 5 minutes and AAA every 30 while the tab stays open — the buttons are there for an on-demand refresh, not the only way to trigger it. The news check still needs your own judgment call; ask Claude any time for a fresh read on that.
+    Kalshi and AAA now both fetch automatically when this page loads, then Kalshi re-checks every 5 minutes and AAA every 30 while the tab stays open. Each AAA fetch logs a day of price history in your browser — once ~15 days build up, the "normal move" threshold switches from your selected regime to actual measured volatility. The news check still needs your own judgment call; ask Claude any time for a fresh read on that, or to wire in RBOB futures once you've got a free EIA API key.
   </footer>
 
 </div>
@@ -350,6 +375,7 @@ async function fetchAaa(){
       asOf: data.asOf,
       yesterday: parseFloat(document.getElementById('aaaYesterday').value)
     });
+    recordPriceHistory(data.asOf, data.price);
 
     statusEl.className = 'fetch-status ok';
     statusEl.textContent = data.asOf ? `Fetched — AAA shows this as of ${data.asOf}.` : 'Fetched successfully.';
@@ -386,6 +412,58 @@ function saveAaaHistory(hist){
   if(typeof hist.yesterday === 'number') document.getElementById('aaaYesterday').value = hist.yesterday.toFixed(4);
 })();
 
+// --- rolling volatility history (research Stage 1) ---
+// A real 20-day rolling standard deviation needs ~20 days of logged prices,
+// which this tool doesn't have on day one. So: log one price per calendar
+// date every time we fetch, and once there's enough history, use the actual
+// measured volatility instead of the manual regime floor — taking whichever
+// is larger, per the research recommendation.
+const PRICE_HISTORY_KEY = 'gasCheckerPriceHistory';
+const MIN_DAYS_FOR_ROLLING = 15; // need this many logged days before trusting a measured stdev
+
+function loadPriceHistory(){
+  try{
+    const raw = localStorage.getItem(PRICE_HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e){ return []; }
+}
+
+function recordPriceHistory(asOf, price){
+  if(!asOf || typeof price !== 'number') return;
+  let hist = loadPriceHistory();
+  hist = hist.filter(h => h.date !== asOf); // de-dupe same-day re-fetches
+  hist.push({ date: asOf, price });
+  if(hist.length > 90) hist = hist.slice(hist.length - 90); // cap stored history
+  try{ localStorage.setItem(PRICE_HISTORY_KEY, JSON.stringify(hist)); } catch(e){ /* skip */ }
+  updateHistoryStatus(hist);
+}
+
+// Simple population standard deviation of day-over-day change, in cents.
+// Assumes the logged entries are in roughly chronological order (true here
+// since we only ever append via recordPriceHistory on each fetch).
+function rollingStdevCents(hist){
+  if(hist.length < MIN_DAYS_FOR_ROLLING + 1) return null;
+  const changes = [];
+  for(let i = 1; i < hist.length; i++){
+    changes.push((hist[i].price - hist[i-1].price) * 100);
+  }
+  const mean = changes.reduce((a,b) => a+b, 0) / changes.length;
+  const variance = changes.reduce((a,b) => a + Math.pow(b - mean, 2), 0) / changes.length;
+  return Math.sqrt(variance);
+}
+
+function updateHistoryStatus(hist){
+  const el = document.getElementById('historyStatus');
+  if(!el) return;
+  const sigma = rollingStdevCents(hist);
+  if(sigma === null){
+    el.textContent = `${hist.length}/${MIN_DAYS_FOR_ROLLING + 1} days logged — need a bit more history before measured volatility kicks in. Using the regime floor for now.`;
+  } else {
+    el.textContent = `${hist.length} days logged — measured volatility: ${sigma.toFixed(2)}¢/day. Using whichever is larger, that or your selected regime floor.`;
+  }
+}
+updateHistoryStatus(loadPriceHistory());
+
 document.getElementById('fetchKalshiBtn').addEventListener('click', fetchKalshi);
 document.getElementById('fetchAaaBtn').addEventListener('click', fetchAaa);
 
@@ -410,26 +488,28 @@ function recompute(){
   }
 
   const gapCents = (today - threshold) * 100;
-  const typicalMove = 0.6;
+  const regimeFloor = parseFloat(document.getElementById('regimeSelect').value);
+  const measuredSigma = rollingStdevCents(loadPriceHistory());
+  const typicalMove = measuredSigma !== null ? Math.max(measuredSigma, regimeFloor) : regimeFloor;
   const badge = document.getElementById('badge');
   const why = document.getElementById('why');
 
   if(newsFlag){
     badge.textContent = 'SKIP TODAY';
     badge.className = 'badge skip';
-    why.innerHTML = `You flagged breaking news today. When something's actually happening — a storm, an attack, a refinery going down — gas prices can jump or drop far more than the usual half-cent overnight move. The math below doesn't apply on days like this. Best to sit this one out.`;
+    why.innerHTML = `You flagged breaking news today. When something's actually happening — a storm, an attack, a refinery going down — gas prices can jump or drop far more than usual. The math below doesn't apply on days like this. Best to sit this one out.`;
   } else if(gapCents > typicalMove){
     badge.textContent = 'BUY YES';
     badge.className = 'badge buy';
-    why.innerHTML = `Today's price is already <b>${gapCents.toFixed(2)}¢ above</b> the line Kalshi is betting on. On a normal day, prices rarely move more than about half a cent overnight, so tomorrow will likely clear that line too. Kalshi's only charging ${yesCents}¢ for YES right now — that looks cheap for how likely this is. (Background risk is elevated this season — worth a quick headline scan before you click buy.)`;
+    why.innerHTML = `Today's price is already <b>${gapCents.toFixed(2)}¢ above</b> the line Kalshi is betting on — more than the ${typicalMove.toFixed(2)}¢ that counts as a normal move under the current ${measuredSigma !== null ? 'measured' : 'selected'} regime. So tomorrow will likely clear that line too. Kalshi's only charging ${yesCents}¢ for YES right now — that looks cheap for how likely this is. (Background risk is elevated this season — worth a quick headline scan before you click buy.)`;
   } else if(gapCents < -typicalMove){
-    badge.textContent = "DON'T BUY YES";
-    badge.className = 'badge skip';
-    why.innerHTML = `Today's price is <b>${Math.abs(gapCents).toFixed(2)}¢ below</b> the line Kalshi is betting on. It's unlikely to jump that far overnight on a normal day, so YES is probably not worth ${yesCents}¢ today — but NO, priced at ${noCentsForWhy}¢, looks more interesting here. Check the "$10 on NO" numbers below.`;
+    badge.textContent = 'BUY NO';
+    badge.className = 'badge buy';
+    why.innerHTML = `Today's price is <b>${Math.abs(gapCents).toFixed(2)}¢ below</b> the line Kalshi is betting on — more than the ${typicalMove.toFixed(2)}¢ that counts as a normal move under the current ${measuredSigma !== null ? 'measured' : 'selected'} regime. So tomorrow will likely stay under that line too — meaning NO is the side to have. Kalshi's only charging ${noCentsForWhy}¢ for NO right now — that looks cheap for how likely this is. (Background risk is elevated this season — worth a quick headline scan before you click buy.)`;
   } else {
     badge.textContent = 'SKIP TODAY';
     badge.className = 'badge wait';
-    why.innerHTML = `Today's price is only <b>${gapCents.toFixed(2)}¢</b> from the line — that's within normal overnight noise, so there's no clear edge either way.`;
+    why.innerHTML = `Today's price is only <b>${gapCents.toFixed(2)}¢</b> from the line — inside the ${typicalMove.toFixed(2)}¢ that counts as normal noise right now, so there's no clear edge either way.`;
   }
 
   const budgetNo = parseFloat(document.getElementById('budgetNo').value);
@@ -442,6 +522,10 @@ function recompute(){
     contracts:'outContractsNo', fee:'outFeeNo', cost:'outCostNo',
     payout:'outPayoutNo', profit:'outProfitNo', loss:'outLossNo'
   });
+
+  // Cheap-contract guard: research showed sub-15¢ legs lose money on average.
+  document.getElementById('warnYes').style.display = (yesCents < 15) ? 'flex' : 'none';
+  document.getElementById('warnNo').style.display = (noCentsForWhy < 15) ? 'flex' : 'none';
 }
 
 // Same Kalshi fee formula applies to either side — YES or NO — since both
@@ -467,6 +551,7 @@ function fillCalc(priceCents, budget, ids){
 }
 
 document.querySelectorAll('input').forEach(el => el.addEventListener('input', recompute));
+document.getElementById('regimeSelect').addEventListener('change', recompute);
 recompute();
 
 // Auto-fetch both sources as soon as the page loads, then keep Kalshi's
