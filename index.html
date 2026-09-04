@@ -255,21 +255,30 @@ async function fetchKalshi(){
 
     // Parse every returned market, then keep only the one whose YES price
     // is closest to 50¢ — i.e. the closest to a genuine coin-flip.
+    // Note: Kalshi returns *_dollars fields as strings (e.g. "0.5600"),
+    // not numbers — parseFloat them rather than checking typeof === 'number'.
     const parsed = markets.map(m => {
-      const title = m.title || m.subtitle || m.ticker;
+      const title = m.yes_sub_title || m.title || m.subtitle || m.ticker;
+
       let yesCents = null;
-      if(typeof m.yes_bid_dollars === 'number') yesCents = Math.round(m.yes_bid_dollars * 100);
-      else if(typeof m.yes_bid === 'number') yesCents = m.yes_bid;
+      if(m.yes_bid_dollars !== undefined && m.yes_bid_dollars !== null){
+        const v = parseFloat(m.yes_bid_dollars);
+        if(!isNaN(v) && v > 0) yesCents = Math.round(v * 100);
+      }
 
       let noCents = null;
-      if(typeof m.no_bid_dollars === 'number') noCents = Math.round(m.no_bid_dollars * 100);
-      else if(typeof m.no_bid === 'number') noCents = m.no_bid;
-      else if(yesCents !== null) noCents = 100 - yesCents;
+      if(m.no_bid_dollars !== undefined && m.no_bid_dollars !== null){
+        const v = parseFloat(m.no_bid_dollars);
+        if(!isNaN(v) && v > 0) noCents = Math.round(v * 100);
+      }
+      if(noCents === null && yesCents !== null) noCents = 100 - yesCents; // fallback estimate
 
       let thresholdGuess = null;
-      const match = (title || '').match(/(\d+\.\d+)/);
-      if(match) thresholdGuess = parseFloat(match[1]);
-      else if(typeof m.floor_strike === 'number') thresholdGuess = m.floor_strike;
+      if(typeof m.floor_strike === 'number') thresholdGuess = m.floor_strike;
+      else {
+        const match = (title || '').match(/(\d+\.\d+)/);
+        if(match) thresholdGuess = parseFloat(match[1]);
+      }
 
       return { title, yesCents, noCents, thresholdGuess };
     }).filter(m => m.yesCents !== null);
