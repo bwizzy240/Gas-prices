@@ -189,6 +189,33 @@
     <div class="fetch-status" id="historyStatus" style="margin-top:8px;"></div>
   </div>
 
+  <!-- EIA WHOLESALE SIGNALS -->
+  <div class="panel">
+    <p class="panel-title">
+      <span>Wholesale signals (EIA)</span>
+      <button class="fetch-btn" id="fetchEiaBtn">Fetch latest</button>
+    </p>
+    <div class="fetch-status" id="eiaStatus">Not fetched yet — tap "Fetch latest" for gasoline spot, crude, and refinery data.</div>
+    <div id="eiaDetails" style="margin-top:10px; display:none;">
+      <div class="row">
+        <label>Gasoline spot (NY Harbor)<span class="sub">free proxy for RBOB futures — EIA doesn't publish futures for free</span></label>
+        <span class="v" style="font-family:var(--mono); font-size:14px;" id="eiaGasoline">–</span>
+      </div>
+      <div class="row">
+        <label>WTI crude spot</label>
+        <span class="v" style="font-family:var(--mono); font-size:14px;" id="eiaWti">–</span>
+      </div>
+      <div class="row">
+        <label>Crack spread<span class="sub">gasoline − crude/42, rough approximation</span></label>
+        <span class="v" style="font-family:var(--mono); font-size:14px;" id="eiaCrack">–</span>
+      </div>
+      <div class="row">
+        <label>Refinery utilization<span class="sub">flagged elevated above 95%</span></label>
+        <span class="v" style="font-family:var(--mono); font-size:14px;" id="eiaUtilization">–</span>
+      </div>
+    </div>
+  </div>
+
   <!-- AAA readout -->
   <div class="panel">
     <p class="panel-title">
@@ -246,7 +273,7 @@
   </div>
 
   <footer>
-    Kalshi and AAA now both fetch automatically when this page loads, then Kalshi re-checks every 5 minutes and AAA every 30 while the tab stays open. Each AAA fetch logs a day of price history in your browser — once ~15 days build up, the "normal move" threshold switches from your selected regime to actual measured volatility. The news check still needs your own judgment call; ask Claude any time for a fresh read on that, or to wire in RBOB futures once you've got a free EIA API key.
+    Kalshi and AAA fetch automatically on page load, then Kalshi re-checks every 5 minutes and AAA every 30. EIA's wholesale data (gasoline spot, crude, refinery utilization) refreshes hourly — that one needs an <code>EIA_API_KEY</code> environment variable set in Vercel, and its exact series IDs are unverified until you deploy and check <code>/api/eia</code> directly. Each AAA fetch also logs a day of price history in your browser — once ~15 days build up, the "normal move" threshold switches from your selected regime to actual measured volatility. The news check still needs your own judgment call.
   </footer>
 
 </div>
@@ -343,6 +370,80 @@ async function fetchKalshi(){
     btn.disabled = false;
   }
 }
+
+// --- EIA wholesale signals ---
+// Holds the last computed signal so recompute() can reference it without
+// re-fetching. Null until a successful fetch populates it.
+let eiaSignal = null;
+
+async function fetchEia(){
+  const statusEl = document.getElementById('eiaStatus');
+  const detailsEl = document.getElementById('eiaDetails');
+  const btn = document.getElementById('fetchEiaBtn');
+  btn.disabled = true;
+  statusEl.className = 'fetch-status';
+  statusEl.textContent = 'Fetching…';
+
+  try{
+    const res = await fetch('/api/eia');
+    const data = await res.json();
+    if(data.error) throw new Error(data.error);
+
+    const errors = [];
+    ['gasoline','wti','utilization'].forEach(k => {
+      if(data[k] && data[k].error) errors.push(`${k}: ${data[k].error}`);
+    });
+    if(errors.length === 3){
+      throw new Error('All three EIA series failed — ' + errors.join('; '));
+    }
+
+    const gRows = (data.gasoline && data.gasoline.rows) || [];
+    const wRows = (data.wti && data.wti.rows) || [];
+    const uRows = (data.utilization && data.utilization.rows) || [];
+
+    let gasolineTrendPct = null;
+    if(gRows.length >= 2){
+      const latest = gRows[0].value;
+      const oldest = gRows[gRows.length - 1].value;
+      gasolineTrendPct = ((latest - oldest) / oldest) * 100;
+    }
+
+    let crackSpread = null;
+    if(gRows.length >= 1 && wRows.length >= 1){
+      crackSpread = gRows[0].value - (wRows[0].value / 42); // 42 gal/barrel
+    }
+
+    let utilizationLatest = uRows.length >= 1 ? uRows[0].value : null;
+
+    eiaSignal = { gasolineTrendPct, crackSpread, utilizationLatest, errors };
+
+    if(gRows.length) document.getElementById('eiaGasoline').textContent =
+      `$${gRows[0].value.toFixed(3)}/gal` + (gasolineTrendPct !== null ? ` (${gasolineTrendPct >= 0 ? '+' : ''}${gasolineTrendPct.toFixed(1)}% / ${gRows.length}d)` : '');
+    if(wRows.length) document.getElementById('eiaWti').textContent = `$${wRows[0].value.toFixed(2)}/bbl`;
+    if(crackSpread !== null) document.getElementById('eiaCrack').textContent = `$${crackSpread.toFixed(2)}/gal`;
+    if(utilizationLatest !== null) document.getElementById('eiaUtilization').textContent =
+      `${utilizationLatest.toFixed(1)}%` + (utilizationLatest > 95 ? ' — elevated' : '');
+
+    detailsEl.style.display = (gRows.length || wRows.length || uRows.length) ? 'block' : 'none';
+
+    if(errors.length > 0){
+      statusEl.className = 'fetch-status err';
+      statusEl.textContent = `Partial data — ${errors.length} series failed: ${errors.join('; ')}`;
+    } else {
+      statusEl.className = 'fetch-status ok';
+      statusEl.textContent = 'Fetched successfully.';
+    }
+
+    recompute();
+  } catch(err){
+    statusEl.className = 'fetch-status err';
+    statusEl.textContent = 'Live fetch failed (' + err.message + '). This one may need its series IDs double-checked — see the comment at the top of api/eia.js.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('fetchEiaBtn').addEventListener('click', fetchEia);
 
 async function fetchAaa(){
   const statusEl = document.getElementById('aaaStatus');
@@ -501,15 +602,15 @@ function recompute(){
   } else if(gapCents > typicalMove){
     badge.textContent = 'BUY YES';
     badge.className = 'badge buy';
-    why.innerHTML = `Today's price is already <b>${gapCents.toFixed(2)}¢ above</b> the line Kalshi is betting on — more than the ${typicalMove.toFixed(2)}¢ that counts as a normal move under the current ${measuredSigma !== null ? 'measured' : 'selected'} regime. So tomorrow will likely clear that line too. Kalshi's only charging ${yesCents}¢ for YES right now — that looks cheap for how likely this is. (Background risk is elevated this season — worth a quick headline scan before you click buy.)`;
+    why.innerHTML = `Today's price is already <b>${gapCents.toFixed(2)}¢ above</b> the line Kalshi is betting on — more than the ${typicalMove.toFixed(2)}¢ that counts as a normal move under the current ${measuredSigma !== null ? 'measured' : 'selected'} regime. So tomorrow will likely clear that line too. Kalshi's only charging ${yesCents}¢ for YES right now — that looks cheap for how likely this is. (Background risk is elevated this season — worth a quick headline scan before you click buy.)` + eiaAgreementNote('up');
   } else if(gapCents < -typicalMove){
     badge.textContent = 'BUY NO';
     badge.className = 'badge buy';
-    why.innerHTML = `Today's price is <b>${Math.abs(gapCents).toFixed(2)}¢ below</b> the line Kalshi is betting on — more than the ${typicalMove.toFixed(2)}¢ that counts as a normal move under the current ${measuredSigma !== null ? 'measured' : 'selected'} regime. So tomorrow will likely stay under that line too — meaning NO is the side to have. Kalshi's only charging ${noCentsForWhy}¢ for NO right now — that looks cheap for how likely this is. (Background risk is elevated this season — worth a quick headline scan before you click buy.)`;
+    why.innerHTML = `Today's price is <b>${Math.abs(gapCents).toFixed(2)}¢ below</b> the line Kalshi is betting on — more than the ${typicalMove.toFixed(2)}¢ that counts as a normal move under the current ${measuredSigma !== null ? 'measured' : 'selected'} regime. So tomorrow will likely stay under that line too — meaning NO is the side to have. Kalshi's only charging ${noCentsForWhy}¢ for NO right now — that looks cheap for how likely this is. (Background risk is elevated this season — worth a quick headline scan before you click buy.)` + eiaAgreementNote('down');
   } else {
     badge.textContent = 'SKIP TODAY';
     badge.className = 'badge wait';
-    why.innerHTML = `Today's price is only <b>${gapCents.toFixed(2)}¢</b> from the line — inside the ${typicalMove.toFixed(2)}¢ that counts as normal noise right now, so there's no clear edge either way.`;
+    why.innerHTML = `Today's price is only <b>${gapCents.toFixed(2)}¢</b> from the line — inside the ${typicalMove.toFixed(2)}¢ that counts as normal noise right now, so there's no clear edge either way.` + eiaTiebreakerNote();
   }
 
   const budgetNo = parseFloat(document.getElementById('budgetNo').value);
@@ -528,8 +629,33 @@ function recompute(){
   document.getElementById('warnNo').style.display = (noCentsForWhy < 15) ? 'flex' : 'none';
 }
 
-// Same Kalshi fee formula applies to either side — YES or NO — since both
-// are just contracts priced between 1¢ and 99¢.
+// Turns the EIA wholesale trend into a short agreement/disagreement note,
+// per the research recommendation: use it to add confidence when it agrees
+// with persistence, not to override the core price-vs-threshold call.
+function eiaAgreementNote(direction){
+  if(!eiaSignal || eiaSignal.gasolineTrendPct === null) return '';
+  const trend = eiaSignal.gasolineTrendPct;
+  const threshold = 3; // research's ±3% trigger
+  const trendUp = trend > threshold;
+  const trendDown = trend < -threshold;
+  if(direction === 'up' && trendUp) return ` Wholesale gasoline's also been trending up (${trend.toFixed(1)}% recently) — that agrees with this call.`;
+  if(direction === 'down' && trendDown) return ` Wholesale gasoline's also been trending down (${trend.toFixed(1)}% recently) — that agrees with this call.`;
+  if(direction === 'up' && trendDown) return ` Worth noting: wholesale gasoline's actually been trending down (${trend.toFixed(1)}% recently) — that cuts against this call, so treat it with a bit less confidence.`;
+  if(direction === 'down' && trendUp) return ` Worth noting: wholesale gasoline's actually been trending up (${trend.toFixed(1)}% recently) — that cuts against this call, so treat it with a bit less confidence.`;
+  return '';
+}
+
+// Inside the "too close to call" skip zone, the wholesale trend can break
+// the tie — this is the one place it's allowed to suggest a lean, not just
+// confirm/deny an existing call.
+function eiaTiebreakerNote(){
+  if(!eiaSignal || eiaSignal.gasolineTrendPct === null) return '';
+  const trend = eiaSignal.gasolineTrendPct;
+  const threshold = 3;
+  if(trend > threshold) return ` One tiebreaker: wholesale gasoline's been trending up ${trend.toFixed(1)}% recently, which leans toward YES if you want to take a smaller, lower-confidence position.`;
+  if(trend < -threshold) return ` One tiebreaker: wholesale gasoline's been trending down ${trend.toFixed(1)}% recently, which leans toward NO if you want to take a smaller, lower-confidence position.`;
+  return '';
+}
 function fillCalc(priceCents, budget, ids){
   const P = priceCents / 100;
   if(!(P > 0 && P < 1 && budget > 0)) return;
@@ -560,8 +686,10 @@ recompute();
 // and the same-day check above keeps repeated fetches safe either way.
 fetchKalshi();
 fetchAaa();
+fetchEia();
 setInterval(fetchKalshi, 5 * 60 * 1000);   // every 5 minutes
 setInterval(fetchAaa, 30 * 60 * 1000);     // every 30 minutes
+setInterval(fetchEia, 60 * 60 * 1000);     // every 60 minutes — EIA data is daily/weekly at best
 </script>
 </body>
 </html>
