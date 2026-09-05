@@ -172,21 +172,28 @@
     <p class="panel-title"><span>News check &amp; regime</span></p>
     <div class="risk-line">
       <span class="risk-dot elevated"></span>
-      <span>Background risk right now: <b>elevated</b> — Middle East tensions, tight global refining capacity, active hurricane season. No single new shock as of this check, but the usual "small daily move" pattern is less reliable than normal.</span>
+      <span>Background risk <i>(assessed Sep 4, 2026 — may be stale, verify against current headlines)</i>: <b>elevated</b> — Middle East tensions, tight global refining capacity, active hurricane season.</span>
     </div>
     <div class="toggle-row">
       <label>Something happened today<span class="sub">new attack, storm landfall, refinery shutdown, surprise OPEC move</span></label>
       <input type="checkbox" id="newsFlag">
     </div>
     <div class="row">
-      <label>Volatility regime<span class="sub">sets how big a move counts as "normal" — from the Sep 2026 research pass</span></label>
+      <label>Volatility regime<span class="sub">floors set from the Sep 4, 2026 research pass — revisit if conditions have shifted</span></label>
       <select id="regimeSelect">
         <option value="1.5">Calm (1.5¢)</option>
         <option value="2.0">Normal / hurricane season (2.0¢)</option>
-        <option value="9.0" selected>Active shock (9.0¢) — current default</option>
+        <option value="9.0" selected>Active shock (9.0¢) — default as of Sep 4, 2026</option>
       </select>
     </div>
     <div class="fetch-status" id="historyStatus" style="margin-top:8px;"></div>
+  </div>
+
+  <!-- TRACK RECORD -->
+  <div class="panel">
+    <p class="panel-title"><span>Track record</span></p>
+    <div class="fetch-status" id="scorecardStatus">No graded calls yet.</div>
+    <div class="market-list" id="scorecardList"></div>
   </div>
 
   <!-- EIA WHOLESALE SIGNALS -->
@@ -235,15 +242,21 @@
       <label>Yesterday's price ($)</label>
       <input type="number" id="aaaYesterday" value="4.1436" step="0.0001">
     </div>
+    <div class="fetch-status" id="dispersionStatus" style="margin-top:8px;"></div>
   </div>
 
   <!-- Trade calculator -->
   <div class="panel">
     <p class="panel-title"><span>If you spend $10 on YES</span></p>
     <div class="row">
-      <label>Budget ($)</label>
+      <label>Budget ($)<span class="sub">base stake — scaled up below if auto-sizing is on</span></label>
       <input type="number" id="budget" value="10" step="1" min="1">
     </div>
+    <div class="toggle-row">
+      <label>Auto-size with edge<span class="sub">bigger edge beyond "normal" → bigger stake, capped at 3×</span></label>
+      <input type="checkbox" id="autoSizeToggle">
+    </div>
+    <div class="fetch-status" id="sizeNoteYes" style="margin-bottom:6px;"></div>
     <div class="calc-grid">
       <div class="calc-item"><div class="k">Shares you get</div><div class="v" id="outContracts">–</div></div>
       <div class="calc-item"><div class="k">Fee</div><div class="v" id="outFee">–</div></div>
@@ -258,9 +271,10 @@
   <div class="panel">
     <p class="panel-title"><span>If you spend $10 on NO</span></p>
     <div class="row">
-      <label>Budget ($)</label>
+      <label>Budget ($)<span class="sub">base stake — scaled up below if auto-sizing is on</span></label>
       <input type="number" id="budgetNo" value="10" step="1" min="1">
     </div>
+    <div class="fetch-status" id="sizeNoteNo" style="margin-bottom:6px;"></div>
     <div class="calc-grid">
       <div class="calc-item"><div class="k">Shares you get</div><div class="v" id="outContractsNo">–</div></div>
       <div class="calc-item"><div class="k">Fee</div><div class="v" id="outFeeNo">–</div></div>
@@ -520,10 +534,17 @@ async function fetchAaa(){
     });
     recordPriceHistory(data.asOf, data.price);
 
+    const nationalYesterday = parseFloat(document.getElementById('aaaYesterday').value);
+    const nationalDeltaCents = !isNaN(nationalYesterday) ? (data.price - nationalYesterday) * 100 : null;
+    checkStateDispersion(data.states, nationalDeltaCents, data.asOf);
+
     statusEl.className = 'fetch-status ok';
     statusEl.textContent = data.asOf ? `Fetched — AAA shows this as of ${data.asOf}.` : 'Fetched successfully.';
 
     recompute();
+    const badgeText = document.getElementById('badge').textContent;
+    const thresholdVal = parseFloat(document.getElementById('threshold').value);
+    recordPrediction(data.asOf, badgeText, thresholdVal);
   } catch(err){
     statusEl.className = 'fetch-status err';
     statusEl.textContent = 'Live fetch failed (' + err.message + '). Use the manual fields below instead.';
@@ -574,11 +595,13 @@ function loadPriceHistory(){
 function recordPriceHistory(asOf, price){
   if(!asOf || typeof price !== 'number') return;
   let hist = loadPriceHistory();
+  const alreadyHadThisDate = hist.some(h => h.date === asOf);
   hist = hist.filter(h => h.date !== asOf); // de-dupe same-day re-fetches
   hist.push({ date: asOf, price });
   if(hist.length > 90) hist = hist.slice(hist.length - 90); // cap stored history
   try{ localStorage.setItem(PRICE_HISTORY_KEY, JSON.stringify(hist)); } catch(e){ /* skip */ }
   updateHistoryStatus(hist);
+  if(!alreadyHadThisDate) gradePendingPredictions(asOf, price);
 }
 
 // Simple population standard deviation of day-over-day change, in cents.
@@ -606,6 +629,152 @@ function updateHistoryStatus(hist){
   }
 }
 updateHistoryStatus(loadPriceHistory());
+
+// --- track record / self-scorecard ---
+// Logs each BUY YES / BUY NO call once per day (keyed by the AAA date it
+// was made on), then grades it the next time a genuinely new day's price
+// comes in — checking whether that next price actually landed on the
+// predicted side of the threshold used at call time.
+// Caveat: if you skip checking the tool for several days, the next fetch
+// grades against whatever price happens to come in next, not necessarily
+// the very next calendar day — fine for occasional gaps, but a multi-day
+// gap means that grade isn't really "next-day accuracy" anymore.
+const PREDICTIONS_KEY = 'gasCheckerPredictions';
+
+function loadPredictions(){
+  try{
+    const raw = localStorage.getItem(PREDICTIONS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e){ return []; }
+}
+
+function savePredictions(preds){
+  try{ localStorage.setItem(PREDICTIONS_KEY, JSON.stringify(preds)); } catch(e){ /* skip */ }
+}
+
+function recordPrediction(callDate, badge, threshold){
+  if(!callDate || (badge !== 'BUY YES' && badge !== 'BUY NO')) return; // only grade real calls
+  let preds = loadPredictions();
+  preds = preds.filter(p => p.callDate !== callDate); // de-dupe same-day re-calls
+  preds.push({ callDate, badge, threshold, graded: false, correct: null, actualPrice: null });
+  if(preds.length > 90) preds = preds.slice(preds.length - 90);
+  savePredictions(preds);
+  updateScorecard();
+}
+
+function gradePendingPredictions(newDate, newPrice){
+  let preds = loadPredictions();
+  let changed = false;
+  preds.forEach(p => {
+    if(!p.graded && p.callDate !== newDate){
+      const wasYes = p.badge === 'BUY YES';
+      const actualAboveThreshold = newPrice > p.threshold; // matches Kalshi's own strict-inequality resolution rule
+      p.correct = wasYes ? actualAboveThreshold : !actualAboveThreshold;
+      p.actualPrice = newPrice;
+      p.graded = true;
+      changed = true;
+    }
+  });
+  if(changed){ savePredictions(preds); updateScorecard(); }
+}
+
+function updateScorecard(){
+  const statusEl = document.getElementById('scorecardStatus');
+  const listEl = document.getElementById('scorecardList');
+  if(!statusEl || !listEl) return;
+
+  const preds = loadPredictions();
+  const graded = preds.filter(p => p.graded);
+  const correct = graded.filter(p => p.correct).length;
+
+  if(graded.length === 0){
+    statusEl.textContent = 'No graded calls yet — check back after a BUY YES/BUY NO call and the next day\'s fetch.';
+  } else {
+    const rate = ((correct / graded.length) * 100).toFixed(0);
+    statusEl.textContent = `${correct}/${graded.length} correct (${rate}%) over ${graded.length} graded call${graded.length === 1 ? '' : 's'}.`;
+  }
+
+  listEl.innerHTML = '';
+  graded.slice(-8).reverse().forEach(p => {
+    const item = document.createElement('div');
+    item.className = 'market-item';
+    const mark = p.correct ? '✓ correct' : '✗ missed';
+    item.innerHTML = `<div class="t">${p.callDate} — ${p.badge}</div><div class="p">Line $${p.threshold.toFixed(4)} · actual $${p.actualPrice.toFixed(4)} · ${mark}</div>`;
+    listEl.appendChild(item);
+  });
+}
+
+updateScorecard();
+
+// --- state-level dispersion check ---
+// Tracks day-over-day price for two bellwether states (CA: isolated
+// CARB-spec market prone to solo swings; TX: Gulf Coast refining proxy)
+// and flags when one of them is moving much more than the national
+// average — a sign the "national" move might really be one region's event,
+// not a broad trend. Deliberately small/illustrative, not full state coverage.
+const STATE_HISTORY_KEY = 'gasCheckerStateHistory';
+
+function loadStateHistory(){
+  try{
+    const raw = localStorage.getItem(STATE_HISTORY_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch(e){ return {}; }
+}
+
+function saveStateHistory(hist){
+  try{ localStorage.setItem(STATE_HISTORY_KEY, JSON.stringify(hist)); } catch(e){ /* skip */ }
+}
+
+// Rolls today->yesterday for one state the same way the national price
+// does, only on a genuinely new date, then returns that state's day-over-day
+// change in cents (or null if there's no prior day to compare against yet).
+function rollStatePrice(code, price, asOf){
+  const hist = loadStateHistory();
+  const prev = hist[code];
+  let deltaCents = null;
+  if(prev && prev.asOf !== asOf && typeof prev.today === 'number'){
+    deltaCents = (price - prev.today) * 100;
+    hist[code] = { today: price, yesterday: prev.today, asOf };
+  } else if(!prev){
+    hist[code] = { today: price, yesterday: null, asOf };
+  } else if(prev.asOf === asOf){
+    hist[code] = { ...prev, today: price }; // same-day refresh, keep yesterday as-is
+    if(typeof prev.yesterday === 'number') deltaCents = (price - prev.yesterday) * 100;
+  }
+  saveStateHistory(hist);
+  return deltaCents;
+}
+
+function checkStateDispersion(statesData, nationalDeltaCents, asOf){
+  const el = document.getElementById('dispersionStatus');
+  if(!el) return;
+  if(!statesData || nationalDeltaCents === null){
+    el.textContent = '';
+    return;
+  }
+
+  const flags = [];
+  const notes = [];
+  ['CA', 'TX'].forEach(code => {
+    const s = statesData[code];
+    if(!s || s.error || typeof s.price !== 'number') return;
+    const stateDelta = rollStatePrice(code, s.price, asOf);
+    if(stateDelta === null) return;
+    notes.push(`${code} ${stateDelta >= 0 ? '+' : ''}${stateDelta.toFixed(1)}¢`);
+    const nationalMagnitude = Math.max(Math.abs(nationalDeltaCents), 0.3); // floor to avoid divide-by-near-zero noise
+    if(Math.abs(stateDelta) > 3 * nationalMagnitude && Math.abs(stateDelta) > 2){
+      flags.push(`${code} moved ${stateDelta.toFixed(1)}¢ vs national's ${nationalDeltaCents.toFixed(1)}¢ — looks state-specific, not a broad trend.`);
+    }
+  });
+
+  if(flags.length > 0){
+    el.textContent = `Regional flag: ${flags.join(' ')}`;
+  } else if(notes.length > 0){
+    el.textContent = `Bellwether states (${notes.join(', ')}) look proportional to the national move — no regional flag.`;
+  } else {
+    el.textContent = '';
+  }
+}
 
 document.getElementById('fetchKalshiBtn').addEventListener('click', fetchKalshi);
 document.getElementById('fetchAaaBtn').addEventListener('click', fetchAaa);
@@ -665,12 +834,39 @@ function recompute(){
   }
 
   const budgetNo = parseFloat(document.getElementById('budgetNo').value);
+  const autoSize = document.getElementById('autoSizeToggle').checked;
 
-  fillCalc(yesCents, budget, {
+  // Edge excess is measured toward whichever side the call actually favors —
+  // positive gapCents excess for YES, positive -gapCents excess for NO.
+  const yesEdgeExcess = gapCents - typicalMove;
+  const noEdgeExcess = (-gapCents) - typicalMove;
+
+  const sizeNoteYes = document.getElementById('sizeNoteYes');
+  const sizeNoteNo = document.getElementById('sizeNoteNo');
+  let effectiveBudgetYes = budget;
+  let effectiveBudgetNo = budgetNo;
+
+  if(autoSize){
+    const yesScaled = scaledBudget(budget, yesEdgeExcess, typicalMove);
+    const noScaled = scaledBudget(budgetNo, noEdgeExcess, typicalMove);
+    effectiveBudgetYes = yesScaled.amount;
+    effectiveBudgetNo = noScaled.amount;
+    sizeNoteYes.textContent = yesScaled.multiplier > 1
+      ? `Auto-sized to ${yesScaled.multiplier.toFixed(1)}× ($${yesScaled.amount.toFixed(2)}) for this edge.`
+      : `No scale-up — edge isn't beyond normal on the YES side.`;
+    sizeNoteNo.textContent = noScaled.multiplier > 1
+      ? `Auto-sized to ${noScaled.multiplier.toFixed(1)}× ($${noScaled.amount.toFixed(2)}) for this edge.`
+      : `No scale-up — edge isn't beyond normal on the NO side.`;
+  } else {
+    sizeNoteYes.textContent = '';
+    sizeNoteNo.textContent = '';
+  }
+
+  fillCalc(yesCents, effectiveBudgetYes, {
     contracts:'outContracts', fee:'outFee', cost:'outCost',
     payout:'outPayout', profit:'outProfit', loss:'outLoss'
   });
-  fillCalc(noCentsForWhy, budgetNo, {
+  fillCalc(noCentsForWhy, effectiveBudgetNo, {
     contracts:'outContractsNo', fee:'outFeeNo', cost:'outCostNo',
     payout:'outPayoutNo', profit:'outProfitNo', loss:'outLossNo'
   });
@@ -722,6 +918,18 @@ function eiaTiebreakerNote(){
   }
   return note;
 }
+
+// Scales a base stake up when the model's edge is well beyond the "normal
+// move" band — bigger excess = more confident call = bigger (capped) stake.
+// edgeExcessCents: how far beyond typicalMove the gap already is (can be
+// negative in the skip zone, where this just returns the base unchanged).
+function scaledBudget(base, edgeExcessCents, typicalMove){
+  if(typicalMove <= 0 || edgeExcessCents <= 0) return { amount: base, multiplier: 1 };
+  const ratio = edgeExcessCents / typicalMove;
+  const multiplier = Math.min(1 + ratio, 3); // capped at 3x the base stake
+  return { amount: base * multiplier, multiplier };
+}
+
 function fillCalc(priceCents, budget, ids){
   const P = priceCents / 100;
   if(!(P > 0 && P < 1 && budget > 0)) return;
