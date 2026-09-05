@@ -413,16 +413,34 @@ async function fetchEia(){
       crackSpread = gRows[0].value - (wRows[0].value / 42); // 42 gal/barrel
     }
 
+    // Crack spread trend: compute the same $-gasoline-minus-crude/42 spread
+    // at the oldest point both series cover, so "widening" is measured over
+    // matching dates rather than mismatched windows.
+    let crackSpreadTrend = null; // $/gal change, oldest -> latest
+    const alignedLen = Math.min(gRows.length, wRows.length);
+    if(alignedLen >= 2){
+      const latestCrack = gRows[0].value - (wRows[0].value / 42);
+      const oldestCrack = gRows[alignedLen - 1].value - (wRows[alignedLen - 1].value / 42);
+      crackSpreadTrend = latestCrack - oldestCrack;
+    }
+
     let utilizationLatest = uRows.length >= 1 ? uRows[0].value : null;
 
-    eiaSignal = { gasolineTrendPct, crackSpread, utilizationLatest, errors };
+    // The one directional (not just agree/disagree) EIA signal: research
+    // found high utilization + widening crack spread historically precedes
+    // larger, upward-skewed retail moves. Both conditions have to hold.
+    const supplySkewElevated = (utilizationLatest !== null && utilizationLatest > 95)
+      && (crackSpreadTrend !== null && crackSpreadTrend > 0);
+
+    eiaSignal = { gasolineTrendPct, crackSpread, crackSpreadTrend, utilizationLatest, supplySkewElevated, errors };
 
     if(gRows.length) document.getElementById('eiaGasoline').textContent =
       `$${gRows[0].value.toFixed(3)}/gal` + (gasolineTrendPct !== null ? ` (${gasolineTrendPct >= 0 ? '+' : ''}${gasolineTrendPct.toFixed(1)}% / ${gRows.length}d)` : '');
     if(wRows.length) document.getElementById('eiaWti').textContent = `$${wRows[0].value.toFixed(2)}/bbl`;
-    if(crackSpread !== null) document.getElementById('eiaCrack').textContent = `$${crackSpread.toFixed(2)}/gal`;
+    if(crackSpread !== null) document.getElementById('eiaCrack').textContent =
+      `$${crackSpread.toFixed(2)}/gal` + (crackSpreadTrend !== null ? ` (${crackSpreadTrend >= 0 ? 'widening' : 'narrowing'} ${crackSpreadTrend >= 0 ? '+' : ''}$${crackSpreadTrend.toFixed(2)} / ${alignedLen}d)` : '');
     if(utilizationLatest !== null) document.getElementById('eiaUtilization').textContent =
-      `${utilizationLatest.toFixed(1)}%` + (utilizationLatest > 95 ? ' — elevated' : '');
+      `${utilizationLatest.toFixed(1)}%` + (utilizationLatest > 95 ? ' — elevated' : '') + (supplySkewElevated ? ' · supply-skew flag: ON' : '');
 
     detailsEl.style.display = (gRows.length || wRows.length || uRows.length) ? 'block' : 'none';
 
@@ -633,28 +651,43 @@ function recompute(){
 // per the research recommendation: use it to add confidence when it agrees
 // with persistence, not to override the core price-vs-threshold call.
 function eiaAgreementNote(direction){
-  if(!eiaSignal || eiaSignal.gasolineTrendPct === null) return '';
-  const trend = eiaSignal.gasolineTrendPct;
-  const threshold = 3; // research's ±3% trigger
-  const trendUp = trend > threshold;
-  const trendDown = trend < -threshold;
-  if(direction === 'up' && trendUp) return ` Wholesale gasoline's also been trending up (${trend.toFixed(1)}% recently) — that agrees with this call.`;
-  if(direction === 'down' && trendDown) return ` Wholesale gasoline's also been trending down (${trend.toFixed(1)}% recently) — that agrees with this call.`;
-  if(direction === 'up' && trendDown) return ` Worth noting: wholesale gasoline's actually been trending down (${trend.toFixed(1)}% recently) — that cuts against this call, so treat it with a bit less confidence.`;
-  if(direction === 'down' && trendUp) return ` Worth noting: wholesale gasoline's actually been trending up (${trend.toFixed(1)}% recently) — that cuts against this call, so treat it with a bit less confidence.`;
-  return '';
+  if(!eiaSignal) return '';
+  let note = '';
+  if(eiaSignal.gasolineTrendPct !== null){
+    const trend = eiaSignal.gasolineTrendPct;
+    const threshold = 3; // research's ±3% trigger
+    const trendUp = trend > threshold;
+    const trendDown = trend < -threshold;
+    if(direction === 'up' && trendUp) note += ` Wholesale gasoline's also been trending up (${trend.toFixed(1)}% recently) — that agrees with this call.`;
+    else if(direction === 'down' && trendDown) note += ` Wholesale gasoline's also been trending down (${trend.toFixed(1)}% recently) — that agrees with this call.`;
+    else if(direction === 'up' && trendDown) note += ` Worth noting: wholesale gasoline's actually been trending down (${trend.toFixed(1)}% recently) — that cuts against this call, so treat it with a bit less confidence.`;
+    else if(direction === 'down' && trendUp) note += ` Worth noting: wholesale gasoline's actually been trending up (${trend.toFixed(1)}% recently) — that cuts against this call, so treat it with a bit less confidence.`;
+  }
+  // Supply-skew flag (high utilization + widening crack spread) only ever
+  // argues for upward pressure — it agrees with BUY YES, cuts against BUY NO.
+  if(eiaSignal.supplySkewElevated){
+    if(direction === 'up') note += ` Refinery utilization is elevated and the crack spread is widening — that combination has historically preceded larger, upward-skewed moves, which supports this call further.`;
+    else if(direction === 'down') note += ` One caution: refinery utilization is elevated and the crack spread is widening — that combination has historically preceded larger, upward-skewed moves, which cuts against a NO call specifically.`;
+  }
+  return note;
 }
 
 // Inside the "too close to call" skip zone, the wholesale trend can break
 // the tie — this is the one place it's allowed to suggest a lean, not just
 // confirm/deny an existing call.
 function eiaTiebreakerNote(){
-  if(!eiaSignal || eiaSignal.gasolineTrendPct === null) return '';
-  const trend = eiaSignal.gasolineTrendPct;
-  const threshold = 3;
-  if(trend > threshold) return ` One tiebreaker: wholesale gasoline's been trending up ${trend.toFixed(1)}% recently, which leans toward YES if you want to take a smaller, lower-confidence position.`;
-  if(trend < -threshold) return ` One tiebreaker: wholesale gasoline's been trending down ${trend.toFixed(1)}% recently, which leans toward NO if you want to take a smaller, lower-confidence position.`;
-  return '';
+  if(!eiaSignal) return '';
+  let note = '';
+  if(eiaSignal.gasolineTrendPct !== null){
+    const trend = eiaSignal.gasolineTrendPct;
+    const threshold = 3;
+    if(trend > threshold) note += ` One tiebreaker: wholesale gasoline's been trending up ${trend.toFixed(1)}% recently, which leans toward YES if you want to take a smaller, lower-confidence position.`;
+    else if(trend < -threshold) note += ` One tiebreaker: wholesale gasoline's been trending down ${trend.toFixed(1)}% recently, which leans toward NO if you want to take a smaller, lower-confidence position.`;
+  }
+  if(eiaSignal.supplySkewElevated){
+    note += ` Also worth knowing: refinery utilization is elevated with a widening crack spread, a combination that's historically preceded upward-skewed moves — another small lean toward YES.`;
+  }
+  return note;
 }
 function fillCalc(priceCents, budget, ids){
   const P = priceCents / 100;
