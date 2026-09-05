@@ -146,7 +146,7 @@
       <span>Live from Kalshi</span>
       <button class="fetch-btn" id="fetchKalshiBtn">Fetch latest</button>
     </p>
-    <div class="fetch-status" id="kalshiStatus">Not fetched yet — tap "Fetch latest" for the closest-to-even-odds market.</div>
+    <div class="fetch-status" id="kalshiStatus">Not fetched yet — tap "Fetch latest" for the market with the biggest model edge.</div>
     <div class="market-list" id="marketList"></div>
   </div>
 
@@ -305,8 +305,8 @@ async function fetchKalshi(){
 
     statusEl.className = 'fetch-status ok';
 
-    // Parse every returned market, then keep only the one whose YES price
-    // is closest to 50¢ — i.e. the closest to a genuine coin-flip.
+    // Parse every returned market — scored below by model edge, not by
+    // proximity to 50¢.
     // Note: Kalshi returns *_dollars fields as strings (e.g. "0.5600"),
     // not numbers — parseFloat them rather than checking typeof === 'number'.
     const parsed = markets.map(m => {
@@ -341,10 +341,34 @@ async function fetchKalshi(){
       return;
     }
 
-    parsed.sort((a, b) => Math.abs(a.yesCents - 50) - Math.abs(b.yesCents - 50));
-    const closest = parsed[0];
+    // Score each market by model edge: how far today's confirmed AAA price
+    // clears that market's threshold, beyond what counts as a normal move
+    // right now. Bigger excess = more confident BUY YES/BUY NO call.
+    // Falls back to "closest to 50/50" only if today's AAA price isn't
+    // available yet to score against.
+    const todayPrice = parseFloat(document.getElementById('aaaToday').value);
+    let closest;
+    if(!isNaN(todayPrice)){
+      const { value: typicalMove } = currentTypicalMove();
+      parsed.forEach(m => {
+        if(m.thresholdGuess !== null){
+          const gap = Math.abs((todayPrice - m.thresholdGuess) * 100);
+          m.edgeScore = gap - typicalMove;
+        } else {
+          m.edgeScore = -Infinity; // can't score a market with no readable threshold
+        }
+      });
+      parsed.sort((a, b) => b.edgeScore - a.edgeScore);
+      closest = parsed[0];
+    } else {
+      parsed.sort((a, b) => Math.abs(a.yesCents - 50) - Math.abs(b.yesCents - 50));
+      closest = parsed[0];
+    }
 
-    statusEl.textContent = `Closest to even odds: YES ${closest.yesCents}¢ — filled in below.`;
+    const edgeNote = (closest.edgeScore !== undefined && closest.edgeScore > -Infinity)
+      ? `Biggest model edge: ${closest.edgeScore >= 0 ? '+' : ''}${closest.edgeScore.toFixed(2)}¢ beyond normal — filled in below.`
+      : `Closest to even odds: YES ${closest.yesCents}¢ — filled in below.`;
+    statusEl.textContent = edgeNote;
 
     const item = document.createElement('div');
     item.className = 'market-item';
@@ -586,6 +610,17 @@ updateHistoryStatus(loadPriceHistory());
 document.getElementById('fetchKalshiBtn').addEventListener('click', fetchKalshi);
 document.getElementById('fetchAaaBtn').addEventListener('click', fetchAaa);
 
+// Shared by recompute() and fetchKalshi()'s market-picking step, so both
+// always agree on what counts as a "normal" move right now.
+function currentTypicalMove(){
+  const regimeFloor = parseFloat(document.getElementById('regimeSelect').value);
+  const measuredSigma = rollingStdevCents(loadPriceHistory());
+  return {
+    value: measuredSigma !== null ? Math.max(measuredSigma, regimeFloor) : regimeFloor,
+    measuredSigma
+  };
+}
+
 function recompute(){
   const today = parseFloat(document.getElementById('aaaToday').value);
   const yesterday = parseFloat(document.getElementById('aaaYesterday').value);
@@ -607,9 +642,7 @@ function recompute(){
   }
 
   const gapCents = (today - threshold) * 100;
-  const regimeFloor = parseFloat(document.getElementById('regimeSelect').value);
-  const measuredSigma = rollingStdevCents(loadPriceHistory());
-  const typicalMove = measuredSigma !== null ? Math.max(measuredSigma, regimeFloor) : regimeFloor;
+  const { value: typicalMove, measuredSigma } = currentTypicalMove();
   const badge = document.getElementById('badge');
   const why = document.getElementById('why');
 
